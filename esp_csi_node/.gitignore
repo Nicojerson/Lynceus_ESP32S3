@@ -1,0 +1,11 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+release_bins/
+__pycache__/
+*.bin
+*.npz
+*.csv
+.env
+.claude-flow/
