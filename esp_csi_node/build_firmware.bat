@@ -6,4 +6,4 @@ echo PATH_SET >> C:\Users\ruv\idf_test.txt
 cd /d C:\Users\ruv\Projects\wifi-densepose\firmware\esp32-csi-node
 echo CD_DONE >> C:\Users\ruv\idf_test.txt
 python %IDF_PATH%\tools\idf.py build >> C:\Users\ruv\idf_test.txt 2>&1
-echo RC=%ERRORLEVEL% >> C:\Users\ruv\idf_test.txt
+echo RC=%ERRORLEVEL% >> C:\Users\ruv\idf_test.txt 
