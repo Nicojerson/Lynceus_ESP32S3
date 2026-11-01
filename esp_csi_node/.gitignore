@@ -1,11 +1,31 @@
+# --- ESP-IDF / firmware ---
 build/
-managed_components/
 sdkconfig
 sdkconfig.old
-release_bins/
+managed_components/
+.espressif/
+
+# --- Python ---
 __pycache__/
-*.bin
+*.pyc
+.venv/
+venv/
+
+# --- Datos capturados (privados: pueden tener MACs de terceros) ---
+capturas/
 *.npz
-*.csv
+wifi_*.bin
+wifi_*_frames.csv
+wifi_*_eventos.csv
+informe_*.txt
+
+# --- Secretos (nunca subir) ---
 .env
-.claude-flow/
+*.env
+secrets*
+
+# --- Editor / sistema ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

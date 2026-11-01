@@ -25,6 +25,7 @@ CONFIG_ESP_WIFI_CSI_ENABLED=y
 # Disable unused features to reduce binary size
 CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # LWIP: enable extended socket options for UDP multicast
 CONFIG_LWIP_SO_RCVBUF=y

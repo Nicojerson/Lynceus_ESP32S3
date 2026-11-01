@@ -90,6 +90,8 @@ static int64_t s_last_send_us = 0;
 #define CSI_MIN_PROCESS_INTERVAL_US  (20 * 1000)  /* 50 Hz */
 static int64_t s_last_process_us = 0;
 static uint32_t s_early_drop = 0;
+static volatile uint32_t s_dbg_total = 0, s_dbg_mac_ok = 0, s_dbg_gate_ok = 0;
+static volatile int64_t s_dbg_max_send_us = 0, s_dbg_max_edge_us = 0;
 
 /* ---- ADR-029: Channel-hop state ---- */
 
@@ -250,6 +252,13 @@ size_t csi_serialize_frame(const wifi_csi_info_t *info, uint8_t *buf, size_t buf
 static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
 {
     (void)ctx;
+    s_dbg_total++;
+    if (s_filter_mac_set) {
+        if (memcmp(info->mac, s_filter_mac, 6) != 0) {
+            return;  /* Source MAC doesn't match filter — skip frame. */
+        }
+    }
+    s_dbg_mac_ok++;
 
     /* Early rate gate: drop excess callbacks to ~50 Hz to prevent
      * SPI flash cache crash in WiFi ISR (wDev_ProcessFiq). */
@@ -259,15 +268,12 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
         return;
     }
     s_last_process_us = now_us;
+    s_dbg_gate_ok++;
 
     /* ADR-060: MAC address filtering — drop frames from non-matching sources.
      * Uses defensively-copied s_filter_mac instead of g_nvs_config (which can
      * be corrupted by wifi_init_sta — same root cause as the node_id clobber). */
-    if (s_filter_mac_set) {
-        if (memcmp(info->mac, s_filter_mac, 6) != 0) {
-            return;  /* Source MAC doesn't match filter — skip frame. */
-        }
-    }
+
 
     s_cb_count++;
 
@@ -286,8 +292,11 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
          * We only need 20-50 Hz for the sensing pipeline. */
         int64_t now = esp_timer_get_time();
         if ((now - s_last_send_us) >= CSI_MIN_SEND_INTERVAL_US) {
+            int64_t t_a = esp_timer_get_time();
             int ret = serial_sender_send(frame_buf, frame_len);
-            if (ret > 0) {
+            int64_t d_a = esp_timer_get_time() - t_a;
+            if (d_a > s_dbg_max_send_us) s_dbg_max_send_us = d_a;        
+                if (ret > 0) {
                 s_send_ok++;
                 s_last_send_us = now;
             } else {
@@ -303,8 +312,11 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
 
     /* ADR-039: Enqueue raw I/Q into edge processing ring buffer. */
     if (info->buf && info->len > 0) {
+        int64_t t_b = esp_timer_get_time();
         edge_enqueue_csi((const uint8_t *)info->buf, (uint16_t)info->len,
                          (int8_t)info->rx_ctrl.rssi, info->rx_ctrl.channel);
+        int64_t d_b = esp_timer_get_time() - t_b;
+        if (d_b > s_dbg_max_edge_us) s_dbg_max_edge_us = d_b;
     }
 
     /* ADR-110 §A0.11/§A0.12 — Emit a sync-packet every N CSI frames so the
@@ -389,6 +401,27 @@ static void wifi_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 static esp_ping_handle_t s_self_ping = NULL;
 static void csi_ping_cb_noop(esp_ping_handle_t hdl, void *args) { (void)hdl; (void)args; }
 
+static volatile uint32_t s_ping_ok = 0, s_ping_to = 0;
+
+static void csi_ping_ok(esp_ping_handle_t hdl, void *args)
+{
+    (void)hdl; (void)args;
+    if ((++s_ping_ok % 50) == 0)
+    ESP_LOGI("ping", "resp=%lu to=%lu | cb total=%lu mac_ok=%lu gate_ok=%lu | max_send=%lldus max_edge=%lldus",
+        (unsigned long)s_ping_ok, (unsigned long)s_ping_to,
+        (unsigned long)s_dbg_total, (unsigned long)s_dbg_mac_ok,
+        (unsigned long)s_dbg_gate_ok,
+        (long long)s_dbg_max_send_us, (long long)s_dbg_max_edge_us);
+}
+
+static void csi_ping_to(esp_ping_handle_t hdl, void *args)
+{
+    (void)hdl; (void)args;
+    if ((++s_ping_to % 10) == 1)
+        ESP_LOGW("ping", "SIN respuesta del router (timeouts=%lu)",
+                 (unsigned long)s_ping_to);
+}
+
 static void csi_start_self_ping(void)
 {
     if (s_self_ping != NULL) {
@@ -412,15 +445,15 @@ static void csi_start_self_ping(void)
     esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
     cfg.target_addr     = target;
     cfg.count           = ESP_PING_COUNT_INFINITE;
-    cfg.interval_ms     = 20;     /* 50 Hz -> ~50 received OFDM replies/sec */
+    cfg.interval_ms     = 40;     /* 50 Hz -> ~50 received OFDM replies/sec */
     cfg.data_size       = 1;
     cfg.task_stack_size = 4096;
     cfg.timeout_ms      = 100;    // si se pierde una respuesta, no esperar 1 s antes del siguiente ping
 
     esp_ping_callbacks_t cbs = {
         .cb_args         = NULL,
-        .on_ping_success = csi_ping_cb_noop,
-        .on_ping_timeout = csi_ping_cb_noop,
+        .on_ping_success = csi_ping_ok,
+        .on_ping_timeout = csi_ping_to,
         .on_ping_end     = csi_ping_cb_noop,
     };
 
@@ -529,7 +562,7 @@ void csi_collector_init(void)
     /* Enable promiscuous mode — required for reliable CSI callbacks.
      * Without this, CSI only fires on frames destined to this station,
      * which may be very infrequent on a quiet network. */
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(false));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
 
     /* MGMT-only promiscuous filter + active probe injection (RuView#396).
@@ -594,6 +627,7 @@ void csi_collector_init(void)
 
     ESP_LOGI(TAG, "CSI collection initialized (node_id=%u, channel=%u)",
              (unsigned)s_node_id, (unsigned)csi_channel);
+             
 
     /* RuView#521/#954: start the connected-STA traffic source so the CSI engine
      * receives a guaranteed OFDM unicast floor even when promiscuous capture is
